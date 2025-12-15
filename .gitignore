@@ -1,0 +1,4 @@
+node_modules
+.env
+.vercel
+club-sphere-firebase-adminsdk.json
