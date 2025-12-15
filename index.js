@@ -222,8 +222,6 @@ async function run() {
         });
 
 
-
-
         app.get('/clubs', async (req, res) => {
             const result = await clubsCollections
                 .find({ status: "approved" })
@@ -328,10 +326,12 @@ async function run() {
             res.send(result);
         });
 
+        
 
 
-        // await client.db("admin").command({ ping: 1 });
-        // console.log("Connected to MongoDB!");
+
+        await client.db("admin").command({ ping: 1 });
+        console.log("Connected to MongoDB!");
     } finally {
 
     }
