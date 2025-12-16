@@ -10,7 +10,6 @@ const crypto = require('crypto');
 
 const admin = require("firebase-admin");
 
-
 const decoded = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString('utf8')
 const serviceAccount = JSON.parse(decoded);
 
@@ -24,6 +23,8 @@ function generateTrackingId() {
     return `${ts}-${rand}`;
 }
 
+
+                  // ----------------MiddleWare------------------
 app.use(express.json());
 app.use(cors());
 
@@ -42,15 +43,6 @@ const verifyFBToken = async (req, res, next) => {
     }
 };
 
-const verifyAdmin = async (req, res, next) => {
-    const email = req.decoded_email;
-    const query = { email }
-    const user = await userCollections.findOne(query)
-    if (!user || user.role !== 'admin') {
-        return res.status(403).send({ message: 'Forbidden Access' })
-    }
-    next();
-}
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@firstdb.2rqimp0.mongodb.net/?appName=FirstDB`;
 
@@ -71,6 +63,41 @@ async function run() {
         const membershipsCollections = db.collection('memberships');
         const eventsCollections = db.collection('events');
         const paymentCollections = db.collection('payments');
+        const eventRegistrationsCollection = db.collection('eventRegistrations');
+
+
+        // ---------------------Events APIs--------------------
+        app.post("/events/:id/register", verifyFBToken, async (req, res) => {
+            const eventId = req.params.id;
+            const userEmail = req.decoded_email;
+
+            const event = await eventsCollections.findOne({ _id: new ObjectId(eventId) });
+            if (!event) return res.status(404).send({ message: "Event not found" });
+
+            const exist = await eventRegistrationsCollection.findOne({
+                eventId,
+                userEmail,
+                status: "registered"
+            });
+
+            if (exist) {
+                return res.status(400).send({ message: "Already registered" });
+            }
+
+            const registration = {
+                eventId,
+                clubId: event.clubId,
+                userEmail,
+                status: "registered",
+                paymentId: null,
+                registeredAt: new Date()
+            };
+
+            const result = await eventRegistrationsCollection.insertOne(registration);
+            res.send(result);
+        });
+
+
 
         app.post('/events', async (req, res) => {
             const { clubId, title, description, date, location, price } = req.body;
@@ -91,18 +118,6 @@ async function run() {
             }
         });
 
-        app.patch("/events/:id/join", async (req, res) => {
-            const id = req.params.id;
-            try {
-                const result = await eventsCollections.updateOne(
-                    { _id: new ObjectId(id) },
-                    { $inc: { maxAttendees: 1 } }
-                );
-                res.send(result);
-            } catch (error) {
-                res.status(500).send({ message: "Failed to update attendees" });
-            }
-        });
 
         app.get('/events', async (req, res) => {
             const { clubId } = req.query;
@@ -118,6 +133,7 @@ async function run() {
                 res.status(500).send({ message: 'Failed to fetch events' });
             }
         });
+
 
         app.get('/admin', async (req, res) => {
             try {
@@ -147,6 +163,8 @@ async function run() {
             }
         });
 
+
+         // ---------------------Dashboard APIs--------------------
         app.get('/dashboard/clubs-management', async (req, res) => {
             try {
                 const result = await clubsCollections.find().sort({ createdAt: -1 }).toArray();
@@ -170,6 +188,66 @@ async function run() {
             }
         });
 
+          app.delete('/dashboard/clubs-management/:id', async (req, res) => {
+            try {
+                const id = req.params.id;
+                const result = await clubsCollections.deleteOne({ _id: new ObjectId(id) });
+
+                if (result.deletedCount === 0) {
+                    return res.status(404).send({ message: "Club not found" });
+                }
+
+                await membershipsCollections.deleteMany({ clubId: id });
+                await eventsCollections.deleteMany({ clubId: id });
+                await paymentCollections.deleteMany({ clubId: id });
+
+                res.send({ deletedCount: result.deletedCount });
+            } catch (error) {
+                console.error("Failed to delete club", error);
+                res.status(500).send({ message: "Failed to delete club" });
+            }
+        });
+
+        app.patch('/dashboard/clubs-management/:id', async (req, res) => {
+            try {
+                const clubId = req.params.id;
+
+                const club = await clubsCollections.findOne({ _id: new ObjectId(clubId) });
+                if (!club) return res.status(404).send({ message: "Club not found" });
+
+                if (club.createdByEmail !== req.decoded_email) {
+                    return res.status(403).send({ message: "Forbidden" });
+                }
+
+                const updateData = {
+                    clubName: req.body.clubName || club.clubName,
+                    description: req.body.description || club.description,
+                    location: req.body.location || club.location,
+                    membershipFee: req.body.membershipFee
+                        ? Number(req.body.membershipFee)
+                        : club.membershipFee,
+                    category: req.body.category || club.category,
+                    updatedAt: new Date()
+                };
+
+                if (req.body.bannerImage && req.body.bannerImage.trim() !== "") {
+                    updateData.bannerImage = req.body.bannerImage;
+                }
+
+                const result = await clubsCollections.updateOne(
+                    { _id: new ObjectId(clubId) },
+                    { $set: updateData }
+                );
+
+                res.send(result);
+            } catch (error) {
+                console.error("Failed to update club:", error);
+                res.status(500).send({ message: "Failed to update club" });
+            }
+        });
+
+
+         // ---------------------Users APIs--------------------
         app.post('/users', async (req, res) => {
             const user = req.body;
             user.role = 'member';
@@ -201,6 +279,8 @@ async function run() {
             res.send({ role: user?.role || 'member' });
         });
 
+
+         // ---------------------Clubs APIs--------------------
         app.post('/clubs', async (req, res) => {
             try {
                 const club = req.body;
@@ -221,7 +301,6 @@ async function run() {
             }
         });
 
-
         app.get('/clubs', async (req, res) => {
             const result = await clubsCollections
                 .find({ status: "approved" })
@@ -236,12 +315,16 @@ async function run() {
             res.send(result);
         });
 
+
+        // ---------------Stripe Related APIs------------------
         app.post('/create-checkout-session', async (req, res) => {
             const paymentInfo = req.body;
             const existPayment = await paymentCollections.findOne({
                 clubId: paymentInfo.clubId,
-                customerEmail: paymentInfo.senderEmail
+                customerEmail: paymentInfo.senderEmail,
+                eventId: paymentInfo.eventId
             });
+
             if (existPayment) {
                 return res.status(400).send({ message: "Already paid" });
             }
@@ -261,9 +344,10 @@ async function run() {
                 mode: 'payment',
                 customer_email: paymentInfo.senderEmail,
                 metadata: {
-                    clubId: paymentInfo.clubId,
-                    clubName: paymentInfo.clubName
+                    eventId: paymentInfo.eventId,
+                    clubId: paymentInfo.clubId
                 },
+
                 success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
                 cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
             });
@@ -271,12 +355,14 @@ async function run() {
             res.send({ url: session.url });
         });
 
+
+        // ---------------Payment Related APIs------------------
         app.patch('/payment-success', async (req, res) => {
             const sessionId = req.query.session_id;
             const session = await stripe.checkout.sessions.retrieve(sessionId);
             const transactionId = session.payment_intent;
-            const paymentExist = await paymentCollections.findOne({ transactionId });
 
+            const paymentExist = await paymentCollections.findOne({ transactionId });
             if (paymentExist) {
                 return res.send({
                     message: 'already exist',
@@ -288,29 +374,41 @@ async function run() {
             const trackingId = generateTrackingId();
 
             if (session.payment_status === 'paid') {
+
                 const payment = {
                     amount: session.amount_total / 100,
                     currency: session.currency,
                     customerEmail: session.customer_email,
                     clubId: session.metadata.clubId,
                     clubName: session.metadata.clubName,
-                    transactionId: session.payment_intent,
+                    transactionId,
+                    eventId: session.metadata.eventId,
                     paymentStatus: session.payment_status,
                     paidAt: new Date(),
                     trackingId
                 };
 
-                const resultPayment = await paymentCollections.insertOne(payment);
+                await paymentCollections.insertOne(payment);
+
+                await eventRegistrationsCollection.insertOne({
+                    eventId: session.metadata.eventId,
+                    clubId: session.metadata.clubId,
+                    userEmail: session.customer_email,
+                    status: "registered",
+                    paymentId: transactionId,
+                    registeredAt: new Date()
+                });
+
                 return res.send({
                     success: true,
                     trackingId,
-                    transactionId: session.payment_intent,
-                    paymentInfo: resultPayment
+                    transactionId
                 });
             }
 
             res.send({ success: false });
         });
+
 
         app.get('/payments', verifyFBToken, async (req, res) => {
             const email = req.query.email;
@@ -326,12 +424,9 @@ async function run() {
             res.send(result);
         });
 
-        
 
-
-
-        await client.db("admin").command({ ping: 1 });
-        console.log("Connected to MongoDB!");
+        // await client.db("admin").command({ ping: 1 });
+        // console.log("Connected to MongoDB!");
     } finally {
 
     }
